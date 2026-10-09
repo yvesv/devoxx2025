@@ -40,10 +40,28 @@ opnieuw als er nieuwe talks geüpload zijn, of na een onderbreking. Met `--force
 Het script neemt eerst een handmatig transcript in een voorkeurtaal, dan een automatisch
 gegenereerd, en anders het transcript dat er is.
 
+## IP-blokkade (`IpBlocked` / `RequestBlocked`)
+
+YouTube blokkeert je IP na een aantal requests. Het script wacht dan automatisch
+(`--cooldown 300` seconden, verdubbeld per poging, `--retries 3` keer) en gaat verder.
+Lukt het nog steeds niet, dan stopt het. Bij een herstart gaat het verder waar het was.
+
+Voor een volledige playlist werkt een roterende proxy het best
+(zie [youtube-transcript-api](https://github.com/jdepoix/youtube-transcript-api#working-around-ip-bans-requestblocked-or-ipblocked-exception)):
+
+```bash
+# Webshare: neem het "Residential"-pakket, niet "Proxy Server" of "Static Residential"
+export WEBSHARE_PROXY_USERNAME=...
+export WEBSHARE_PROXY_PASSWORD=...
+python devoxx_transcripts.py
+
+# Of een andere HTTP(S)-proxy
+python devoxx_transcripts.py --proxy http://user:pass@host:port
+```
+
+De proxy wordt alleen gebruikt voor de transcripts, niet voor het ophalen van de playlist.
+
 ## Tips
 
-- Als YouTube je IP blokkeert (`IpBlocked` / `RequestBlocked`), stopt het script.
-  Wacht even en draai het opnieuw met een hogere `--delay`. Cloud-IP's worden vaak geblokkeerd,
-  dus draai het liefst lokaal.
 - Vindt het script de playlist niet, dan toont het de beschikbare playlists op het kanaal.
   Geef dan de juiste mee met `--playlist`.

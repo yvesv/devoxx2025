@@ -10,6 +10,8 @@ Examples:
     python devoxx_transcripts.py
     python devoxx_transcripts.py --playlist "https://www.youtube.com/playlist?list=PL..."
     python devoxx_transcripts.py --format srt --lang en nl fr --delay 2
+    python devoxx_transcripts.py --webshare-user USER --webshare-pass PASS
+    python devoxx_transcripts.py --proxy http://user:pass@host:port
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 import sys
 import time
@@ -33,6 +36,7 @@ from youtube_transcript_api import (
     TranscriptsDisabled,
     YouTubeTranscriptApi,
 )
+from youtube_transcript_api.proxies import GenericProxyConfig, WebshareProxyConfig
 from youtube_transcript_api.formatters import (
     JSONFormatter,
     SRTFormatter,
@@ -121,6 +125,30 @@ def fetch_transcript(api: YouTubeTranscriptApi, video_id: str, languages: list[s
     raise NoTranscriptFound(video_id, languages, transcripts)
 
 
+def fetch_with_cooldown(api: YouTubeTranscriptApi, video_id: str, args: argparse.Namespace, prefix: str):
+    """Retry after an IP block, doubling the wait each time."""
+    wait = args.cooldown
+    for attempt in range(args.retries + 1):
+        try:
+            return fetch_transcript(api, video_id, args.lang)
+        except (IpBlocked, RequestBlocked):
+            if attempt == args.retries:
+                raise
+            log(f"{prefix} — geblokkeerd door YouTube, wacht {wait:.0f}s (poging {attempt + 1}/{args.retries}) ...")
+            time.sleep(wait)
+            wait *= 2
+
+
+def proxy_config(args: argparse.Namespace):
+    if args.webshare_user and args.webshare_pass:
+        log("Proxy: Webshare rotating residential")
+        return WebshareProxyConfig(proxy_username=args.webshare_user, proxy_password=args.webshare_pass)
+    if args.proxy:
+        log(f"Proxy: {re.sub(r'//[^@]*@', '//***@', args.proxy)}")
+        return GenericProxyConfig(http_url=args.proxy, https_url=args.proxy)
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--playlist", help="Playlist URL of ID. Zonder deze optie wordt de playlist op het kanaal gezocht.")
@@ -133,6 +161,16 @@ def main() -> int:
     parser.add_argument("--limit", type=int, help="Enkel de eerste N video's verwerken")
     parser.add_argument("--force", action="store_true", help="Bestaande transcripts opnieuw downloaden")
     parser.add_argument("--cookies", help="cookies.txt (Netscape-formaat) voor de playlist-lookup")
+    parser.add_argument("--webshare-user", default=os.environ.get("WEBSHARE_PROXY_USERNAME"),
+                        help="Webshare 'Residential' proxy username (of env WEBSHARE_PROXY_USERNAME)")
+    parser.add_argument("--webshare-pass", default=os.environ.get("WEBSHARE_PROXY_PASSWORD"),
+                        help="Webshare 'Residential' proxy password (of env WEBSHARE_PROXY_PASSWORD)")
+    parser.add_argument("--proxy", default=os.environ.get("TRANSCRIPT_PROXY"),
+                        help="Andere HTTP(S)-proxy, bv. http://user:pass@host:port (of env TRANSCRIPT_PROXY)")
+    parser.add_argument("--cooldown", type=float, default=300,
+                        help="Seconden wachten na een IP-blokkade voor een nieuwe poging (default: 300)")
+    parser.add_argument("--retries", type=int, default=3,
+                        help="Aantal pogingen na een IP-blokkade, met verdubbelende wachttijd (default: 3, 0 = meteen stoppen)")
     args = parser.parse_args()
 
     playlist = args.playlist
@@ -148,7 +186,7 @@ def main() -> int:
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    api = YouTubeTranscriptApi()
+    api = YouTubeTranscriptApi(proxy_config=proxy_config(args))
     formatter = FORMATTERS[args.format]
     rows = []
     counts = {"ok": 0, "skipped": 0, "missing": 0, "error": 0}
@@ -165,9 +203,10 @@ def main() -> int:
             continue
 
         try:
-            fetched = fetch_transcript(api, video.id, args.lang)
-        except (IpBlocked, RequestBlocked) as exc:
-            log(f"{prefix} — geblokkeerd door YouTube, stop. Probeer later opnieuw of verhoog --delay.\n{exc}")
+            fetched = fetch_with_cooldown(api, video.id, args, prefix)
+        except (IpBlocked, RequestBlocked):
+            log(f"{prefix} — nog steeds geblokkeerd door YouTube, stop. "
+                "Gebruik een proxy (--webshare-user/--webshare-pass of --proxy) of probeer later opnieuw.")
             counts["error"] += 1
             break
         except CouldNotRetrieveTranscript as exc:
