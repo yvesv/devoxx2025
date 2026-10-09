@@ -46,7 +46,21 @@ YouTube blokkeert je IP na een aantal requests. Het script wacht dan automatisch
 (`--cooldown 300` seconden, verdubbeld per poging, `--retries 3` keer) en gaat verder.
 Lukt het nog steeds niet, dan stopt het. Bij een herstart gaat het verder waar het was.
 
-Voor een volledige playlist werkt een roterende proxy het best
+### Gratis: Tor als roterende proxy
+
+```bash
+brew install tor          # Linux: sudo apt install tor
+tor                       # laat dit draaien in een apart terminalvenster
+python devoxx_transcripts.py --tor
+```
+
+Bij elke blokkade vraagt het script een nieuw Tor-circuit aan, en dus een ander IP.
+YouTube blokkeert ook veel Tor-IP's, dus het kan een paar pogingen per video kosten
+(`--tor-rotations`, default 20). Tor is ook trager dan een betaalde proxy.
+
+### Betaald: residential proxy
+
+Voor een volledige playlist werkt een roterende residential proxy het betrouwbaarst
 (zie [youtube-transcript-api](https://github.com/jdepoix/youtube-transcript-api#working-around-ip-bans-requestblocked-or-ipblocked-exception)):
 
 ```bash

@@ -12,6 +12,7 @@ Examples:
     python devoxx_transcripts.py --format srt --lang en nl fr --delay 2
     python devoxx_transcripts.py --webshare-user USER --webshare-pass PASS
     python devoxx_transcripts.py --proxy http://user:pass@host:port
+    python devoxx_transcripts.py --tor          # gratis, via een lokale Tor (brew install tor)
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import csv
 import json
 import os
 import re
+import secrets
 import sys
 import time
 import unicodedata
@@ -125,28 +127,69 @@ def fetch_transcript(api: YouTubeTranscriptApi, video_id: str, languages: list[s
     raise NoTranscriptFound(video_id, languages, transcripts)
 
 
-def fetch_with_cooldown(api: YouTubeTranscriptApi, video_id: str, args: argparse.Namespace, prefix: str):
-    """Retry after an IP block, doubling the wait each time."""
-    wait = args.cooldown
-    for attempt in range(args.retries + 1):
-        try:
-            return fetch_transcript(api, video_id, args.lang)
-        except (IpBlocked, RequestBlocked):
-            if attempt == args.retries:
-                raise
-            log(f"{prefix} — geblokkeerd door YouTube, wacht {wait:.0f}s (poging {attempt + 1}/{args.retries}) ...")
-            time.sleep(wait)
-            wait *= 2
+def tor_url(port: int) -> str:
+    # Tor isolates circuits per SOCKS credentials (IsolateSOCKSAuth), so fresh
+    # random credentials give a new circuit and usually a new exit IP.
+    return f"socks5h://{secrets.token_hex(8)}:x@127.0.0.1:{port}"
 
 
-def proxy_config(args: argparse.Namespace):
-    if args.webshare_user and args.webshare_pass:
-        log("Proxy: Webshare rotating residential")
-        return WebshareProxyConfig(proxy_username=args.webshare_user, proxy_password=args.webshare_pass)
-    if args.proxy:
-        log(f"Proxy: {re.sub(r'//[^@]*@', '//***@', args.proxy)}")
-        return GenericProxyConfig(http_url=args.proxy, https_url=args.proxy)
-    return None
+class Fetcher:
+    """Fetches transcripts and works around IP blocks: a new Tor circuit, or a cool-down."""
+
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self.api = YouTubeTranscriptApi(proxy_config=self.proxy_config())
+
+    def proxy_config(self):
+        args = self.args
+        if args.tor:
+            url = tor_url(args.tor_port)
+            return GenericProxyConfig(http_url=url, https_url=url)
+        if args.webshare_user and args.webshare_pass:
+            return WebshareProxyConfig(proxy_username=args.webshare_user, proxy_password=args.webshare_pass)
+        if args.proxy:
+            return GenericProxyConfig(http_url=args.proxy, https_url=args.proxy)
+        return None
+
+    def describe(self) -> str:
+        args = self.args
+        if args.tor:
+            return f"Tor op 127.0.0.1:{args.tor_port}, nieuw circuit bij elke blokkade"
+        if args.webshare_user and args.webshare_pass:
+            return "Webshare rotating residential"
+        if args.proxy:
+            return re.sub(r"//[^@]*@", "//***@", args.proxy)
+        return "geen (eigen IP)"
+
+    def fetch(self, video_id: str, prefix: str):
+        if self.args.tor:
+            return self._fetch_rotating_tor(video_id, prefix)
+        return self._fetch_with_cooldown(video_id, prefix)
+
+    def _fetch_rotating_tor(self, video_id: str, prefix: str):
+        rotations = self.args.tor_rotations
+        for attempt in range(rotations + 1):
+            try:
+                return fetch_transcript(self.api, video_id, self.args.lang)
+            except (IpBlocked, RequestBlocked):
+                if attempt == rotations:
+                    raise
+                log(f"{prefix} — Tor exit geblokkeerd, nieuw circuit ({attempt + 1}/{rotations}) ...")
+                self.api = YouTubeTranscriptApi(proxy_config=self.proxy_config())
+                time.sleep(2)
+
+    def _fetch_with_cooldown(self, video_id: str, prefix: str):
+        """Retry after an IP block, doubling the wait each time."""
+        wait = self.args.cooldown
+        for attempt in range(self.args.retries + 1):
+            try:
+                return fetch_transcript(self.api, video_id, self.args.lang)
+            except (IpBlocked, RequestBlocked):
+                if attempt == self.args.retries:
+                    raise
+                log(f"{prefix} — geblokkeerd door YouTube, wacht {wait:.0f}s (poging {attempt + 1}/{self.args.retries}) ...")
+                time.sleep(wait)
+                wait *= 2
 
 
 def main() -> int:
@@ -167,6 +210,11 @@ def main() -> int:
                         help="Webshare 'Residential' proxy password (of env WEBSHARE_PROXY_PASSWORD)")
     parser.add_argument("--proxy", default=os.environ.get("TRANSCRIPT_PROXY"),
                         help="Andere HTTP(S)-proxy, bv. http://user:pass@host:port (of env TRANSCRIPT_PROXY)")
+    parser.add_argument("--tor", action="store_true",
+                        help="Via een lokale Tor-proxy, met een nieuw circuit (ander IP) bij elke blokkade")
+    parser.add_argument("--tor-port", type=int, default=9050, help="SOCKS-poort van Tor (default: 9050)")
+    parser.add_argument("--tor-rotations", type=int, default=20,
+                        help="Max. aantal nieuwe Tor-circuits per video (default: 20)")
     parser.add_argument("--cooldown", type=float, default=300,
                         help="Seconden wachten na een IP-blokkade voor een nieuwe poging (default: 300)")
     parser.add_argument("--retries", type=int, default=3,
@@ -186,7 +234,8 @@ def main() -> int:
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    api = YouTubeTranscriptApi(proxy_config=proxy_config(args))
+    fetcher = Fetcher(args)
+    log(f"Proxy: {fetcher.describe()}")
     formatter = FORMATTERS[args.format]
     rows = []
     counts = {"ok": 0, "skipped": 0, "missing": 0, "error": 0}
@@ -203,10 +252,10 @@ def main() -> int:
             continue
 
         try:
-            fetched = fetch_with_cooldown(api, video.id, args, prefix)
+            fetched = fetcher.fetch(video.id, prefix)
         except (IpBlocked, RequestBlocked):
             log(f"{prefix} — nog steeds geblokkeerd door YouTube, stop. "
-                "Gebruik een proxy (--webshare-user/--webshare-pass of --proxy) of probeer later opnieuw.")
+                "Gebruik een proxy (--tor, --webshare-user/--webshare-pass of --proxy) of probeer later opnieuw.")
             counts["error"] += 1
             break
         except CouldNotRetrieveTranscript as exc:
