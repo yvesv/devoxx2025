@@ -23,6 +23,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import sys
 import time
 import unicodedata
@@ -133,6 +134,17 @@ def tor_url(port: int) -> str:
     return f"socks5h://{secrets.token_hex(8)}:x@127.0.0.1:{port}"
 
 
+def check_tor(port: int) -> None:
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=3).close()
+    except OSError:
+        raise SystemExit(
+            f"Tor draait niet (niets bereikbaar op 127.0.0.1:{port}).\n"
+            "Start Tor in een apart terminalvenster met: tor\n"
+            "Wacht tot je 'Bootstrapped 100% (done)' ziet en start dit script dan opnieuw."
+        )
+
+
 class Fetcher:
     """Fetches transcripts and works around IP blocks: a new Tor circuit, or a cool-down."""
 
@@ -220,6 +232,8 @@ def main() -> int:
     parser.add_argument("--retries", type=int, default=3,
                         help="Aantal pogingen na een IP-blokkade, met verdubbelende wachttijd (default: 3, 0 = meteen stoppen)")
     args = parser.parse_args()
+    if args.tor:
+        check_tor(args.tor_port)
 
     playlist = args.playlist
     if playlist and not playlist.startswith("http"):
