@@ -3,8 +3,9 @@
 
 By default the tool looks up the "Devoxx Belgium 2026" playlist on the
 @DevoxxForever channel, lists every video in it and saves the transcript of
-each video to the output directory. Videos that already have a transcript on
-disk are skipped, so the tool can be re-run to pick up newly uploaded talks.
+each video to the output directory: always as structured JSON (metadata plus
+segments with timestamps), and also in the chosen --format. Videos that already
+have a transcript on disk are skipped, so the tool can be re-run to pick up newly uploaded talks.
 
 Examples:
     python devoxx_transcripts.py
@@ -28,6 +29,7 @@ import sys
 import time
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yt_dlp
@@ -41,7 +43,6 @@ from youtube_transcript_api import (
 )
 from youtube_transcript_api.proxies import GenericProxyConfig, WebshareProxyConfig
 from youtube_transcript_api.formatters import (
-    JSONFormatter,
     SRTFormatter,
     TextFormatter,
     WebVTTFormatter,
@@ -52,7 +53,7 @@ DEFAULT_MATCH = r"devoxx\s+belgium.*2026|2026.*devoxx\s+belgium"
 
 FORMATTERS = {
     "txt": TextFormatter(),
-    "json": JSONFormatter(),
+    "json": None,  # structured JSON, always written (see structured_json)
     "srt": SRTFormatter(),
     "vtt": WebVTTFormatter(),
 }
@@ -63,6 +64,7 @@ class Video:
     id: str
     title: str
     index: int
+    duration: float | None = None
 
     @property
     def url(self) -> str:
@@ -107,7 +109,7 @@ def find_playlist(channel: str, pattern: str, cookies: str | None) -> str:
 def list_videos(playlist: str, cookies: str | None) -> tuple[str, list[Video]]:
     info = ydl(cookies).extract_info(playlist, download=False)
     videos = [
-        Video(id=e["id"], title=e.get("title") or e["id"], index=i)
+        Video(id=e["id"], title=e.get("title") or e["id"], index=i, duration=e.get("duration"))
         for i, e in enumerate(info.get("entries") or [], start=1)
         if e and e.get("id")
     ]
@@ -126,6 +128,44 @@ def fetch_transcript(api: YouTubeTranscriptApi, video_id: str, languages: list[s
     for transcript in transcripts:
         return transcript.fetch()
     raise NoTranscriptFound(video_id, languages, transcripts)
+
+
+def hms(seconds: float) -> str:
+    seconds = int(seconds)
+    h, rest = divmod(seconds, 3600)
+    m, s = divmod(rest, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def structured_json(video: Video, playlist_title: str, playlist_url: str, fetched) -> str:
+    segments = [
+        {
+            "start": round(snippet.start, 2),
+            "end": round(snippet.start + snippet.duration, 2),
+            "duration": round(snippet.duration, 2),
+            "timestamp": hms(snippet.start),
+            "url": f"https://youtu.be/{video.id}?t={int(snippet.start)}",
+            "text": snippet.text,
+        }
+        for snippet in fetched.snippets
+    ]
+    data = {
+        "video_id": video.id,
+        "title": video.title,
+        "url": video.url,
+        "playlist": {"title": playlist_title, "url": playlist_url, "index": video.index},
+        "video_duration": video.duration,
+        "transcript": {
+            "language": fetched.language,
+            "language_code": fetched.language_code,
+            "is_generated": fetched.is_generated,
+            "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "segment_count": len(segments),
+            "full_text": " ".join(s["text"] for s in segments),
+        },
+        "segments": segments,
+    }
+    return json.dumps(data, indent=2, ensure_ascii=False)
 
 
 def tor_url(port: int) -> str:
@@ -210,7 +250,8 @@ def main() -> int:
     parser.add_argument("--channel", default=DEFAULT_CHANNEL, help=f"Kanaal om in te zoeken (default: {DEFAULT_CHANNEL})")
     parser.add_argument("--match", default=DEFAULT_MATCH, help="Regex op de playlisttitel (default: Devoxx Belgium 2026)")
     parser.add_argument("-o", "--out", default="transcripts", help="Output directory (default: transcripts)")
-    parser.add_argument("--format", choices=FORMATTERS, default="txt", help="Bestandsformaat (default: txt)")
+    parser.add_argument("--format", choices=FORMATTERS, default="txt",
+                        help="Extra leesbaar formaat naast de JSON, die altijd wordt bewaard (default: txt)")
     parser.add_argument("--lang", nargs="+", default=["en"], help="Voorkeurtalen in volgorde (default: en)")
     parser.add_argument("--delay", type=float, default=1.0, help="Seconden pauze tussen video's (default: 1)")
     parser.add_argument("--limit", type=int, help="Enkel de eerste N video's verwerken")
@@ -250,25 +291,28 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     fetcher = Fetcher(args)
     log(f"Proxy: {fetcher.describe()}")
-    formatter = FORMATTERS[args.format]
+    extensions = list(dict.fromkeys(["json", args.format]))
     rows = []
     counts = {"ok": 0, "skipped": 0, "missing": 0, "error": 0}
 
     for n, video in enumerate(videos, start=1):
-        path = out / f"{video.index:03d}-{slugify(video.title)}-{video.id}.{args.format}"
-        row = {"index": video.index, "video_id": video.id, "title": video.title, "url": video.url, "file": path.name}
+        stem = f"{video.index:03d}-{slugify(video.title)}-{video.id}"
+        paths = {ext: out / f"{stem}.{ext}" for ext in extensions}
+        row = {"index": video.index, "video_id": video.id, "title": video.title, "url": video.url,
+               "file": paths["json"].name}
         prefix = f"[{n}/{len(videos)}] {video.title}"
 
         # Match on video ID, not on the full name: the playlist position can shift
         # when videos are added or reordered.
-        existing = sorted(out.glob(f"*-{video.id}.{args.format}"))
-        if existing and not args.force:
-            if existing[0] != path:
-                existing[0].rename(path)
-                log(f"{prefix} — hernoemd: {existing[0].name} -> {path.name}")
-            for duplicate in existing[1:]:
-                duplicate.unlink()
-                log(f"{prefix} — dubbel bestand verwijderd: {duplicate.name}")
+        existing = {ext: sorted(out.glob(f"*-{video.id}.{ext}")) for ext in extensions}
+        if all(existing.values()) and not args.force:
+            for ext, files in existing.items():
+                if files[0] != paths[ext]:
+                    files[0].rename(paths[ext])
+                    log(f"{prefix} — hernoemd: {files[0].name} -> {paths[ext].name}")
+                for duplicate in files[1:]:
+                    duplicate.unlink()
+                    log(f"{prefix} — dubbel bestand verwijderd: {duplicate.name}")
             counts["skipped"] += 1
             rows.append({**row, "status": "skipped", "language": ""})
             log(f"{prefix} — bestaat al")
@@ -288,15 +332,19 @@ def main() -> int:
             log(f"{prefix} — geen transcript ({type(exc).__name__})")
             continue
 
-        body = formatter.format_transcript(fetched)
-        if args.format == "txt":
-            header = f"# {video.title}\n# {video.url}\n# language: {fetched.language_code}"
-            header += " (auto-generated)\n\n" if fetched.is_generated else "\n\n"
-            body = header + body
-        path.write_text(body + "\n", encoding="utf-8")
-        for stale in existing:
-            if stale != path:
-                stale.unlink()
+        for ext, path in paths.items():
+            if ext == "json":
+                body = structured_json(video, title, playlist, fetched)
+            else:
+                body = FORMATTERS[ext].format_transcript(fetched)
+                if ext == "txt":
+                    header = f"# {video.title}\n# {video.url}\n# language: {fetched.language_code}"
+                    header += " (auto-generated)\n\n" if fetched.is_generated else "\n\n"
+                    body = header + body
+            path.write_text(body + "\n", encoding="utf-8")
+            for stale in existing[ext]:
+                if stale != path:
+                    stale.unlink()
         counts["ok"] += 1
         rows.append({**row, "status": "ok", "language": fetched.language_code})
         log(f"{prefix} — ok ({fetched.language_code}{', auto' if fetched.is_generated else ''})")

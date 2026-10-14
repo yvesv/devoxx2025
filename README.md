@@ -30,9 +30,28 @@ python devoxx_transcripts.py --match "devoxx uk.*2026"   # andere playlist zoeke
 
 ## Output
 
-- `transcripts/NNN-<titel>-<video_id>.<formaat>`: één bestand per talk
+- `transcripts/NNN-<titel>-<video_id>.json`: gestructureerde JSON per talk (altijd)
+- `transcripts/NNN-<titel>-<video_id>.<formaat>`: leesbare versie in het gekozen `--format` (standaard `.txt`)
 - `transcripts/index.csv`: overzicht met status per video (`ok`, `skipped`, `missing`, `error`)
 - `transcripts/playlist.json`: playlisttitel, URL en alle video's
+
+De JSON bevat metadata en per tekstfragment de tijd in de video:
+
+```json
+{
+  "video_id": "abc123",
+  "title": "...",
+  "url": "https://www.youtube.com/watch?v=abc123",
+  "playlist": {"title": "Devoxx Belgium 2026", "url": "...", "index": 1},
+  "video_duration": 3000.0,
+  "transcript": {"language_code": "en", "is_generated": true, "fetched_at": "...",
+                 "segment_count": 812, "full_text": "..."},
+  "segments": [
+    {"start": 754.38, "end": 757.48, "duration": 3.1, "timestamp": "12:34",
+     "url": "https://youtu.be/abc123?t=754", "text": "..."}
+  ]
+}
+```
 
 Video's met een bestaand transcriptbestand worden overgeslagen. Draai het script dus gewoon
 opnieuw als er nieuwe talks geüpload zijn, of na een onderbreking. Met `--force` download je alles opnieuw.
