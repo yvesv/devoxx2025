@@ -259,7 +259,16 @@ def main() -> int:
         row = {"index": video.index, "video_id": video.id, "title": video.title, "url": video.url, "file": path.name}
         prefix = f"[{n}/{len(videos)}] {video.title}"
 
-        if path.exists() and not args.force:
+        # Match on video ID, not on the full name: the playlist position can shift
+        # when videos are added or reordered.
+        existing = sorted(out.glob(f"*-{video.id}.{args.format}"))
+        if existing and not args.force:
+            if existing[0] != path:
+                existing[0].rename(path)
+                log(f"{prefix} — hernoemd: {existing[0].name} -> {path.name}")
+            for duplicate in existing[1:]:
+                duplicate.unlink()
+                log(f"{prefix} — dubbel bestand verwijderd: {duplicate.name}")
             counts["skipped"] += 1
             rows.append({**row, "status": "skipped", "language": ""})
             log(f"{prefix} — bestaat al")
@@ -285,6 +294,9 @@ def main() -> int:
             header += " (auto-generated)\n\n" if fetched.is_generated else "\n\n"
             body = header + body
         path.write_text(body + "\n", encoding="utf-8")
+        for stale in existing:
+            if stale != path:
+                stale.unlink()
         counts["ok"] += 1
         rows.append({**row, "status": "ok", "language": fetched.language_code})
         log(f"{prefix} — ok ({fetched.language_code}{', auto' if fetched.is_generated else ''})")
