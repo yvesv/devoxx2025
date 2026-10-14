@@ -32,6 +32,7 @@ python devoxx_transcripts.py --match "devoxx uk.*2026"   # andere playlist zoeke
 
 - `transcripts/NNN-<titel>-<video_id>.json`: gestructureerde JSON per talk (altijd)
 - `transcripts/NNN-<titel>-<video_id>.<formaat>`: leesbare versie in het gekozen `--format` (standaard `.txt`)
+- `transcripts/numbers.json`: het vaste nummer per video (zie hieronder)
 - `transcripts/index.csv`: overzicht met status per video (`ok`, `skipped`, `missing`, `error`)
 - `transcripts/playlist.json`: playlisttitel, URL en alle video's
 
@@ -42,7 +43,8 @@ De JSON bevat metadata en per tekstfragment de tijd in de video:
   "video_id": "abc123",
   "title": "...",
   "url": "https://www.youtube.com/watch?v=abc123",
-  "playlist": {"title": "Devoxx Belgium 2026", "url": "...", "index": 1},
+  "number": 1,
+  "playlist": {"title": "Devoxx Belgium 2026", "url": "...", "position": 1},
   "video_duration": 3000.0,
   "transcript": {"language_code": "en", "is_generated": true, "fetched_at": "...",
                  "segment_count": 812, "full_text": "..."},
@@ -52,6 +54,12 @@ De JSON bevat metadata en per tekstfragment de tijd in de video:
   ]
 }
 ```
+
+**Vaste nummers.** Elke video krijgt één keer een nummer (`NNN` in de bestandsnaam), en dat blijft zo.
+Nieuwe video's krijgen het volgende vrije nummer, ook als ze vooraan in de playlist staan.
+Nummers van video's die uit de playlist verdwijnen worden niet hergebruikt. De nummers staan in
+`numbers.json`; ontbreekt dat bestand, dan worden ze overgenomen uit de bestaande bestandsnamen.
+De huidige plek in de playlist staat als `position` in de JSON en in `index.csv`.
 
 Video's met een bestaand transcriptbestand worden overgeslagen. Draai het script dus gewoon
 opnieuw als er nieuwe talks geüpload zijn, of na een onderbreking. Met `--force` download je alles opnieuw.

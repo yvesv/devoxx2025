@@ -63,8 +63,9 @@ FORMATTERS = {
 class Video:
     id: str
     title: str
-    index: int
+    position: int  # current position in the playlist; can shift when videos are added
     duration: float | None = None
+    number: int = 0  # stable file number, see assign_numbers()
 
     @property
     def url(self) -> str:
@@ -109,7 +110,7 @@ def find_playlist(channel: str, pattern: str, cookies: str | None) -> str:
 def list_videos(playlist: str, cookies: str | None) -> tuple[str, list[Video]]:
     info = ydl(cookies).extract_info(playlist, download=False)
     videos = [
-        Video(id=e["id"], title=e.get("title") or e["id"], index=i, duration=e.get("duration"))
+        Video(id=e["id"], title=e.get("title") or e["id"], position=i, duration=e.get("duration"))
         for i, e in enumerate(info.get("entries") or [], start=1)
         if e and e.get("id")
     ]
@@ -128,6 +129,45 @@ def fetch_transcript(api: YouTubeTranscriptApi, video_id: str, languages: list[s
     for transcript in transcripts:
         return transcript.fetch()
     raise NoTranscriptFound(video_id, languages, transcripts)
+
+
+NUMBERS_FILE = "numbers.json"
+FILE_RE = re.compile(r"^(\d+)-.*-([A-Za-z0-9_-]{11})\.[a-z]+$")
+
+
+def assign_numbers(out: Path, videos: list[Video]) -> None:
+    """Give every video a number that never changes once assigned.
+
+    Numbers live in numbers.json. On the first run they are taken over from the
+    file names already on disk. New videos get the next free number, in playlist
+    order; numbers of videos that leave the playlist are never reused.
+    """
+    registry_path = out / NUMBERS_FILE
+    if registry_path.exists():
+        registry = {k: int(v) for k, v in json.loads(registry_path.read_text(encoding="utf-8")).items()}
+    else:
+        registry = {}
+        for file in sorted(out.iterdir()):
+            match = FILE_RE.match(file.name)
+            if match:
+                number, video_id = int(match[1]), match[2]
+                registry[video_id] = min(number, registry.get(video_id, number))
+        # Two videos with the same number on disk: the first keeps it, the other gets a new one below.
+        seen = set()
+        for video_id, number in sorted(registry.items(), key=lambda item: (item[1], item[0])):
+            if number in seen:
+                del registry[video_id]
+            seen.add(number)
+
+    next_number = max(registry.values(), default=0) + 1
+    for video in videos:
+        if video.id not in registry:
+            registry[video.id] = next_number
+            next_number += 1
+        video.number = registry[video.id]
+
+    ordered = dict(sorted(registry.items(), key=lambda item: item[1]))
+    registry_path.write_text(json.dumps(ordered, indent=2) + "\n", encoding="utf-8")
 
 
 def hms(seconds: float) -> str:
@@ -153,7 +193,8 @@ def structured_json(video: Video, playlist_title: str, playlist_url: str, fetche
         "video_id": video.id,
         "title": video.title,
         "url": video.url,
-        "playlist": {"title": playlist_title, "url": playlist_url, "index": video.index},
+        "number": video.number,
+        "playlist": {"title": playlist_title, "url": playlist_url, "position": video.position},
         "video_duration": video.duration,
         "transcript": {
             "language": fetched.language,
@@ -283,12 +324,14 @@ def main() -> int:
         playlist = find_playlist(args.channel, args.match, args.cookies)
 
     title, videos = list_videos(playlist, args.cookies)
-    if args.limit:
-        videos = videos[: args.limit]
     log(f"Playlist: {title} — {len(videos)} video's")
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    # Number the whole playlist, also with --limit, so numbers follow playlist order.
+    assign_numbers(out, videos)
+    if args.limit:
+        videos = videos[: args.limit]
     fetcher = Fetcher(args)
     log(f"Proxy: {fetcher.describe()}")
     extensions = list(dict.fromkeys(["json", args.format]))
@@ -296,14 +339,14 @@ def main() -> int:
     counts = {"ok": 0, "skipped": 0, "missing": 0, "error": 0}
 
     for n, video in enumerate(videos, start=1):
-        stem = f"{video.index:03d}-{slugify(video.title)}-{video.id}"
+        stem = f"{video.number:03d}-{slugify(video.title)}-{video.id}"
         paths = {ext: out / f"{stem}.{ext}" for ext in extensions}
-        row = {"index": video.index, "video_id": video.id, "title": video.title, "url": video.url,
+        row = {"number": video.number, "position": video.position, "video_id": video.id, "title": video.title, "url": video.url,
                "file": paths["json"].name}
         prefix = f"[{n}/{len(videos)}] {video.title}"
 
-        # Match on video ID, not on the full name: the playlist position can shift
-        # when videos are added or reordered.
+        # Match on video ID, not on the full name: a title can change, and files from
+        # older versions of this script may carry a different number.
         existing = {ext: sorted(out.glob(f"*-{video.id}.{ext}")) for ext in extensions}
         if all(existing.values()) and not args.force:
             for ext, files in existing.items():
@@ -352,7 +395,7 @@ def main() -> int:
             time.sleep(args.delay)
 
     with (out / "index.csv").open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["index", "video_id", "title", "url", "file", "status", "language"])
+        writer = csv.DictWriter(f, fieldnames=["number", "position", "video_id", "title", "url", "file", "status", "language"])
         writer.writeheader()
         writer.writerows(rows)
     (out / "playlist.json").write_text(
